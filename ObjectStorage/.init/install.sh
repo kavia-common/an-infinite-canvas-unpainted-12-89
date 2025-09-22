@@ -1,67 +1,46 @@
 #!/usr/bin/env bash
 set -euo pipefail
-WS="/home/kavia/workspace/code-generation/an-infinite-canvas-unpainted-12-89/ObjectStorage"
-cd "$WS"
-# helper to check package.json safely
-has_pkg_field() { node -e "try{const p=require('./package.json'); console.log(!!(p$1));}catch(e){console.log('false');}" 2>/dev/null || echo false; }
-# If node_modules missing and package-lock exists, use npm ci (single action)
-if [ ! -d node_modules ] && [ -f package-lock.json ]; then
-  npm ci --prefer-offline --no-audit --no-fund || { echo "npm ci failed" >&2; exit 6; }
-else
-  # Determine missing runtime deps: react, react-dom
-  missing=( )
-  if ! node -e "try{const p=require('./package.json'); if(!(p.dependencies&&p.dependencies.react)) process.exit(1);}catch(e){process.exit(1)}" >/dev/null 2>&1; then missing+=(react); fi
-  if ! node -e "try{const p=require('./package.json'); if(!(p.dependencies&&p.dependencies['react-dom'])) process.exit(1);}catch(e){process.exit(1)}" >/dev/null 2>&1; then missing+=(react-dom); fi
-  if [ ${#missing[@]} -ne 0 ]; then npm install --no-audit --no-fund "${missing[@]}" || { echo "install runtime deps failed" >&2; exit 7; }; fi
+WORKSPACE="/home/kavia/workspace/code-generation/an-infinite-canvas-unpainted-12-89/ObjectStorage"
+cd "$WORKSPACE"
+export CI=true
+export BROWSER=none
+# backup package.json
+[ -f package.json ] && cp package.json package.json.bak.$(date -u +%s)
+# choose package manager
+PKG_MGR=npm
+[ -f yarn.lock ] && PKG_MGR=yarn
+# detect TS need
+TS=false
+[ -f tsconfig.json ] && TS=true
+# prepare list of additional dev deps to ensure before install
+DEV_ADD=()
+if [ "$TS" = true ]; then DEV_ADD+=("typescript"); fi
+# check for @testing-library/react in deps or devDeps
+if ! node -e "const p=require('./package.json');const deps=Object.assign({},p.dependencies||{},p.devDependencies||{});process.exit(deps['@testing-library/react']?0:1)" >/dev/null 2>&1; then
+  DEV_ADD+=("@testing-library/react" "@testing-library/jest-dom")
 fi
-# Detect if project uses react-scripts
-uses_cra=false
-if node -e 'try{const p=require("./package.json"); if((p.dependencies&&p.dependencies["react-scripts"])||(p.devDependencies&&p.devDependencies["react-scripts"])) process.exit(0); process.exit(1);}catch(e){process.exit(1)}' >/dev/null 2>&1; then uses_cra=true; fi
-# Testing libs and ESLint handling
-if [ "$uses_cra" = true ]; then
-  # Prefer CRA built-in ESLint and test; add testing-library only
-  npm install -D --no-audit --no-fund @testing-library/react @testing-library/jest-dom || { echo "install testing libs failed" >&2; exit 8; }
-  # Ensure test script exists and keep other scripts
-  node -e 'const fs=require("fs");const p=fs.existsSync("package.json")?require("./package.json"):{};p.scripts=p.scripts||{}; if(!p.scripts.test) p.scripts.test="react-scripts test --env=jsdom --runInBand"; fs.writeFileSync("package.json",JSON.stringify(p,null,2))'
-else
-  # Non-CRA: install jest and testing libs
-  npm install -D --no-audit --no-fund jest @testing-library/react @testing-library/jest-dom || { echo "install jest/testing libs failed" >&2; exit 9; }
-  # add minimal ESLint react parser/plugins to avoid JSX parse errors
-  npm install -D --no-audit --no-fund eslint-plugin-react @babel/eslint-parser || { echo "install eslint plugins failed" >&2; exit 10; }
-  node -e 'const fs=require("fs");const p=fs.existsSync("package.json")?require("./package.json"):{};p.scripts=p.scripts||{}; if(!p.scripts.test) p.scripts.test="jest --runInBand"; fs.writeFileSync("package.json",JSON.stringify(p,null,2))'
-fi
-# TypeScript typings when requested
-if [ "${TYPESCRIPT:-0}" = "1" ]; then
-  npm install -D --no-audit --no-fund @types/react @types/react-dom || { echo "install TS types failed" >&2; exit 11; }
-  [ -f tsconfig.json ] || npx tsc --init >/dev/null 2>&1 || true
-fi
-# ESLint config: prefer extending CRA if available, else minimal react-capable config
-if [ "$uses_cra" = true ]; then
-  # create minimal file that extends react-scripts if not present
-  if [ ! -f .eslintrc.json ]; then
-    cat > .eslintrc.json <<'EOF'
-{ "extends": ["react-app", "react-app/jest"] }
-EOF
+# Install additional dev deps using chosen package manager (idempotent if no DEV_ADD)
+if [ ${#DEV_ADD[@]} -ne 0 ]; then
+  if [ "$PKG_MGR" = "yarn" ]; then
+    yarn add --dev --silent "${DEV_ADD[@]}" >/dev/null 2>&1 || { echo "yarn add dev deps failed" >&2; exit 4; }
+  else
+    npm i --save-dev --no-audit --no-fund --no-progress "${DEV_ADD[@]}" >/dev/null 2>&1 || { echo "npm add dev deps failed" >&2; exit 4; }
   fi
+fi
+# Run primary install: prefer yarn install, otherwise npm ci if lockfile exists, else npm i
+LOG="${WORKSPACE}/install_log_$(date -u +%s).log"
+if [ "$PKG_MGR" = "yarn" ]; then
+  if ! yarn install --silent >"$LOG" 2>&1; then echo "yarn install failed - see $LOG" >&2; exit 5; fi
 else
-  cat > .eslintrc.json <<'EOF'
-{ "env": { "browser": true, "es2021": true }, "extends": ["eslint:recommended"], "parser": "@babel/eslint-parser", "parserOptions": {"requireConfigFile": false, "ecmaVersion": 2021, "sourceType": "module", "ecmaFeatures": {"jsx": true}}, "plugins": ["react"], "rules": {} }
-EOF
+  if [ -f package-lock.json ]; then
+    if ! npm ci --no-audit --no-fund --no-progress >"$LOG" 2>&1; then echo "npm ci failed - see $LOG" >&2; exit 5; fi
+  else
+    if ! npm i --no-audit --no-fund --no-progress >"$LOG" 2>&1; then echo "npm install failed - see $LOG" >&2; exit 5; fi
+  fi
 fi
-cat > .eslintignore <<'EOF'
-node_modules
-build
-public
-EOF
-# Add smoke test (preserve if exists)
-EXT=js
-if [ -f src/App.tsx ] || [ -f src/index.tsx ]; then EXT=tsx; fi
-mkdir -p src/__tests__
-if [ ! -f "src/__tests__/smoke.test.${EXT}" ]; then
-  cat > "src/__tests__/smoke.test.${EXT}" <<'EOF'
-import React from 'react';
-import { render } from '@testing-library/react';
-import App from '../App';
- test('renders without crashing', () => { render(<App />); });
-EOF
+# Verify react-scripts presence (node_modules layout assumed classic)
+if [ ! -x node_modules/.bin/react-scripts ] && [ ! -f node_modules/.bin/react-scripts ]; then
+  echo 'react-scripts not present after install' >&2
+  exit 6
 fi
+exit 0

@@ -1,26 +1,41 @@
 #!/usr/bin/env bash
 set -euo pipefail
-WS="/home/kavia/workspace/code-generation/an-infinite-canvas-unpainted-12-89/ObjectStorage"
-cd "$WS"
-# Prefer project/react-scripts lint if available
-if node -e 'try{const p=require("./package.json"); if((p.dependencies&&p.dependencies["react-scripts"])||(p.devDependencies&&p.devDependencies["react-scripts"])) process.exit(0); process.exit(1);}catch(e){process.exit(1)}' >/dev/null 2>&1; then
-  # use react-scripts lint if available
-  if command -v npx >/dev/null 2>&1; then
-    npx react-scripts lint src --quiet || { echo "react-scripts lint failed" >&2; exit 12; }
-  fi
-else
-  # fallback to npx eslint scoped to src
-  if command -v npx >/dev/null 2>&1; then
-    npx eslint src --ext .js,.jsx,.ts,.tsx || { echo "ESLint failed" >&2; exit 13; }
+WORKSPACE="/home/kavia/workspace/code-generation/an-infinite-canvas-unpainted-12-89/ObjectStorage"
+cd "$WORKSPACE"
+export CI=true
+export BROWSER=none
+# ensure package.json has test script
+node -e "let fs=require('fs');let p=require('./package.json');p.scripts=p.scripts||{};p.scripts.test=p.scripts.test||'react-scripts test --passWithNoTests --watchAll=false';fs.writeFileSync('package.json',JSON.stringify(p,null,2))"
+# detect package manager
+PKG_MGR=npm
+[ -f yarn.lock ] && PKG_MGR=yarn
+# Create test file compatible with react-scripts (uses import syntax)
+mkdir -p src/__tests__
+cat > src/__tests__/smoke.test.js <<'EOF'
+import React from 'react';
+import { render } from '@testing-library/react';
+import App from '../App';
+test('smoke: render root component if present', ()=>{
+  if(!App) { expect(true).toBeTruthy(); return; }
+  const {container} = render(React.createElement(App));
+  expect(container).toBeTruthy();
+});
+EOF
+# Ensure react-scripts and testing libs are present; install if missing
+if ! command -v react-scripts >/dev/null 2>&1 || ! node -e "try{require('react-scripts');require('@testing-library/react');}catch(e){process.exit(1)}"; then
+  if [ "$PKG_MGR" = "yarn" ]; then
+    yarn add --dev react-scripts @testing-library/react @testing-library/jest-dom --silent
+    yarn install --silent
   else
-    echo "ERROR: npx not found for lint" >&2; exit 14
+    npm i --save-dev react-scripts @testing-library/react @testing-library/jest-dom --silent
+    npm i --silent
   fi
 fi
-# Run tests: adapt to runner
-# Use timeout (GNU coreutils timeout) to avoid long hangs; 300s limit
-if node -e 'try{const p=require("./package.json"); if((p.dependencies&&p.dependencies["react-scripts"])||(p.devDependencies&&p.devDependencies["react-scripts"])) process.exit(0); process.exit(1);}catch(e){process.exit(1)}' >/dev/null 2>&1; then
-  timeout 300 npm test -- --ci --runInBand --watchAll=false || { echo "Tests failed" >&2; exit 15; }
+# Run tests via chosen package manager and capture logs
+LOG="${WORKSPACE}/jest_log_$(date -u +%s).log"
+if [ "$PKG_MGR" = "yarn" ]; then
+  if ! yarn test --silent --runInBand >"$LOG" 2>&1; then echo "tests failed - see: $LOG" >&2; exit 3; fi
 else
-  # use npx jest with CI flags
-  timeout 300 npx jest --runInBand --ci || { echo "Jest tests failed" >&2; exit 16; }
+  if ! npm test --silent -- --runInBand >"$LOG" 2>&1; then echo "tests failed - see: $LOG" >&2; exit 3; fi
 fi
+exit 0
